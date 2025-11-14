@@ -8,8 +8,8 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image as keras_image
 
 #  Config 
-MODEL_PATH = "plant_mobilenetv2.keras"   # saved model
-TRAIN_DIR = "New Plant Diseases Dataset(Small)/train"
+MODEL_PATH = "/Users/arun/deep learning project 1/plant_mobilenetv2.keras"   # saved model
+TRAIN_DIR = "/Users/arun/deep learning project 1/dataset/train"
 IMG_SIZE = (224, 224)
 TOP_K = 3
 
