@@ -1,141 +1,151 @@
 
 import os
 import numpy as np
-import streamlit as st
-from PIL import Image
 import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.preprocessing import image
 from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image as keras_image
+import matplotlib.pyplot as plt
 
-#  Config 
-MODEL_PATH = "/Users/arun/deep learning project 1/plant_mobilenetv2.keras"   # saved model
-TRAIN_DIR = "/Users/arun/deep learning project 1/dataset/train"
+# Basic Configuration
+
+BASE_DIR = "/Users/arun/deep learning project 1/dataset"
+TRAIN_DIR = os.path.join(BASE_DIR, "train")
+VALID_DIR = os.path.join(BASE_DIR, "valid")
+TEST_DIR = os.path.join(BASE_DIR, "test")
+
+
+BATCH_SIZE = 16
 IMG_SIZE = (224, 224)
-TOP_K = 3
+EPOCHS = 5
+MODEL_FILENAME = "plant_mobilenetv2.keras"
 
-st.set_page_config(page_title="🌿 Plant Disease Detector", layout="centered")
+# Verify dataset folders
+assert os.path.isdir(TRAIN_DIR), f"Train directory not found: {TRAIN_DIR}"
+assert os.path.isdir(VALID_DIR), f"Valid directory not found: {VALID_DIR}"
 
-#  Helpers & Caching 
-@st.cache_resource(show_spinner=False)
-def load_trained_model(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Model not found at: {path}")
-    model = load_model(path)
-    return model
+# GPU check
+print("GPU devices:", tf.config.list_physical_devices("GPU"))
 
-@st.cache_data(show_spinner=False)
-def load_class_names(train_dir):
-    if not os.path.isdir(train_dir):
-        return []
-    classes = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
-    return classes
 
-def preprocess_pil_image(pil_img, target_size):
-    img = pil_img.convert("RGB")
-    img = img.resize(target_size)
-    arr = keras_image.img_to_array(img)
-    arr = np.expand_dims(arr, axis=0)
-    arr = tf.keras.applications.mobilenet_v2.preprocess_input(arr)
-    return arr
+# Dataset Preparation
 
-def human_friendly_label(class_name):
-    return class_name.replace("___", " - ").replace("_", " ")
+print("Preparing datasets...")
 
-def healthy_or_infected(class_name):
-    label_lower = class_name.lower().replace("_", " ")
-    if "healthy" in label_lower or "normal" in label_lower:
-        return "Healthy"
-    return "Infected"
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    TRAIN_DIR, labels="inferred", label_mode="categorical",
+    image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=True
+)
 
-# Load model and classes
-st.title("🌿 Plant Disease Detector")
-st.write("Upload an image of a leaf, and the model will predict the disease and plant health status.")
+val_ds = tf.keras.utils.image_dataset_from_directory(
+    VALID_DIR, labels="inferred", label_mode="categorical",
+    image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=False
+)
 
-try:
-    model = load_trained_model(MODEL_PATH)
-except Exception as e:
-    st.error(f"Could not load model: {e}")
-    st.stop()
+class_names = train_ds.class_names
+num_classes = len(class_names)
+print(f"Found {num_classes} classes: {class_names[:10]}")
 
-class_names = load_class_names(TRAIN_DIR)
-if not class_names:
-    st.warning("Could not locate class folders in the train directory. Prediction will still attempt, "
-               "but class labels won't be available.")
-else:
-    st.info(f" Model loaded successfully. {len(class_names)} classes available.")
+AUTOTUNE = tf.data.AUTOTUNE
+train_ds = train_ds.prefetch(buffer_size=AUTOTUNE)
+val_ds = val_ds.prefetch(buffer_size=AUTOTUNE)
 
-#  File uploader UI 
-st.markdown("### 📸 Upload a leaf image")
-uploaded_file = st.file_uploader("Choose an image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    st.markdown("#### Preview")
-    placeholder = st.empty()
-with col2:
-    st.markdown("#### Prediction")
-    result_box = st.empty()
+# Data Augmentation
 
-if uploaded_file is not None:
-    try:
-        pil_img = Image.open(uploaded_file)
-    except Exception as e:
-        st.error(f"Unable to open image: {e}")
-        st.stop()
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.1),
+])
 
-    # Display preview image
-    placeholder.image(pil_img, use_container_width=True)
 
-    if st.button("Predict"):
-        with st.spinner("🧠 Running prediction..."):
-            x = preprocess_pil_image(pil_img, IMG_SIZE)
-            preds = model.predict(x)[0]
+# Model Creation
 
-            if class_names:
-                top_idx = preds.argsort()[-TOP_K:][::-1]
-                results = [(class_names[i], float(preds[i])) for i in top_idx]
+print("Building MobileNetV2 model...")
 
-                # Display top K predictions
-                md = []
-                for name, prob in results:
-                    nice = human_friendly_label(name)
-                    status = healthy_or_infected(name)
-                    md.append(f"**{nice}** — {prob*100:.2f}% — *{status}*")
-                result_box.markdown("\n\n".join(md))
+base_model = MobileNetV2(include_top=False, weights="imagenet", input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
+base_model.trainable = False  # Freeze base
 
-                # Top prediction details
-                top_name, top_prob = results[0]
-                top_nice = human_friendly_label(top_name)
-                top_status = healthy_or_infected(top_name)
+inputs = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
+x = data_augmentation(inputs)
+x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
+x = base_model(x, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
+x = layers.Dense(256, activation="relu")(x)
+x = layers.Dropout(0.3)(x)
+outputs = layers.Dense(num_classes, activation="softmax")(x)
 
-                # 🌿 Dynamic color-coded result box
-                if top_status == "Healthy":
-                    status_color = "#2ecc71"  # green
-                else:
-                    status_color = "#e74c3c"  # red
+model = models.Model(inputs, outputs)
+model.compile(optimizer=tf.keras.optimizers.Adam(1e-4),
+              loss="categorical_crossentropy",
+              metrics=["accuracy"])
 
-                st.markdown(
-                    f"<div style='background-color:{status_color};padding:12px;border-radius:10px;"
-                    f"color:white;font-size:18px;text-align:center;'>"
-                    f"Top prediction: <b>{top_nice}</b> ({top_prob*100:.2f}% confidence) — <i>{top_status}</i>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
+model.summary()
 
-                # Bar chart of top predictions
-                top_labels = [human_friendly_label(class_names[i]) for i in top_idx]
-                top_probs = [float(preds[i]) for i in top_idx]
-                st.bar_chart({lbl: p for lbl, p in zip(top_labels, top_probs)})
 
-            else:
-                # No class names
-                top_idx = int(np.argmax(preds))
-                confidence = float(np.max(preds))
-                result_box.write(f"Predicted class index: {top_idx}, confidence: {confidence*100:.2f}%")
-                st.success("Prediction returned (no class labels available).")
-else:
-    placeholder.info("No image uploaded yet — upload a leaf photo to test the model.")
+# Training Callbacks
 
-# Footer
-st.markdown("---")
-st.caption("Model: MobileNetV2 fine-tuned | Developed by Arun 🌱 | Works offline once model is trained.")
+callbacks = [
+    ModelCheckpoint(MODEL_FILENAME, monitor="val_loss", save_best_only=True, verbose=1),
+    EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True, verbose=1),
+    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6, verbose=1)
+]
+
+
+# Training
+
+print("\nStarting training...")
+history = model.fit(train_ds, epochs=EPOCHS, validation_data=val_ds, callbacks=callbacks)
+
+
+# Evaluation
+
+print("\nEvaluating on validation set...")
+val_loss, val_acc = model.evaluate(val_ds)
+print(f"Validation loss: {val_loss:.4f}, accuracy: {val_acc:.4f}")
+
+# Save final model
+model.save(MODEL_FILENAME)
+print(f"Model saved as {MODEL_FILENAME}")
+
+
+# Prediction Function
+
+def predict_image(img_path, model_path=MODEL_FILENAME, top_k=3):
+    """Predict disease name and show image with label."""
+    if not os.path.exists(img_path):
+        raise FileNotFoundError(f"Image not found: {img_path}")
+    
+    model = load_model(model_path)
+    img = image.load_img(img_path, target_size=IMG_SIZE)
+    x = image.img_to_array(img)
+    x = np.expand_dims(x, axis=0)
+    x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
+    preds = model.predict(x)[0]
+
+    top_idx = preds.argsort()[-top_k:][::-1]
+    results = [(class_names[i], float(preds[i])) for i in top_idx]
+
+    # Display image with top prediction
+    plt.imshow(image.load_img(img_path))
+    plt.axis("off")
+    title = f"Predicted: {results[0][0]} ({results[0][1]*100:.2f}%)"
+    plt.title(title, color="green", fontsize=12, weight="bold")
+    plt.show()
+    return results
+
+
+# Run a Prediction Example
+
+if __name__ == "__main__":
+    test_image = "/Users/arun/deep learning project 1/dataset/train/Apple___Apple_scab/69a10285-eacb-4c83-b410-18e62bf33ef9___FREC_Scab 2908.JPG"
+
+    print("\nPredicting for image:", test_image)
+    results = predict_image(test_image)
+    print("\nTop Predictions:")
+    for name, prob in results:
+        print(f"  {name}: {prob*100:.2f}%")
